@@ -35,6 +35,13 @@ neither has any effect unless configured):
   included in the "postal" format's attachment list; non-matching ones
   are dropped from the payload, but the email itself is still sent. Has
   no effect on the "ses" format, which embeds the raw email as-is.
+
+WEBHOOK_DEBUG_URL (optional) sends an identical, best-effort copy of the
+same signed request to a second URL — for temporarily watching traffic
+without touching WEBHOOK_URL. Failures on this URL are logged, never
+raised, so a broken or slow debug endpoint can never block or fail the
+real WEBHOOK_URL request. WEBHOOK_URL itself becomes optional too: with
+only WEBHOOK_DEBUG_URL set, the function runs in debug-only mode.
 """
 
 # modules used by this function
@@ -307,11 +314,52 @@ SIGNERS = {
 }
 
 
-def send_webhook(envelope: dict[str, Any]) -> requests.Response:
-    """POST the envelope to WEBHOOK_URL, signed per WEBHOOK_SIGNATURE."""
+def send_webhook_debug(
+    webhook_debug_url: str, payload_bytes: bytes, headers: dict[str, str]
+) -> None:
+    """
+    Best-effort copy of the webhook request to WEBHOOK_DEBUG_URL.
+
+    Any failure here (bad status, timeout, connection error) is caught
+    and logged, never raised: a broken or slow debug endpoint must never
+    affect whether the real WEBHOOK_URL request is sent, or make the
+    Lambda invocation "fail" and get retried by SES.
+    """
+    try:
+        response = requests.post(
+            webhook_debug_url, data=payload_bytes, headers=headers, timeout=10
+        )
+    except requests.RequestException as e:
+        print(f'WEBHOOK_DEBUG_URL request failed: {e}')
+        return
+    if response.status_code >= HTTPStatus.MULTIPLE_CHOICES:
+        print(
+            'WEBHOOK_DEBUG_URL request to %(url)s failed with status '
+            '%(status)s: %(body)s'
+            % {
+                'url': webhook_debug_url,
+                'status': response.status_code,
+                'body': response.text,
+            }
+        )
+
+
+def send_webhook(envelope: dict[str, Any]) -> requests.Response | None:
+    """
+    POST the envelope to WEBHOOK_URL, signed per WEBHOOK_SIGNATURE.
+
+    WEBHOOK_DEBUG_URL, if set, gets an identical best-effort copy of the
+    request first (see send_webhook_debug) — it's attempted regardless
+    of whether WEBHOOK_URL is even set, and never affects the outcome
+    below. Returns None instead of a Response when WEBHOOK_URL isn't set
+    (debug-only mode).
+    """
     webhook_url = getenv('WEBHOOK_URL')
-    if webhook_url is None:
-        raise LambdaFunctionException('WEBHOOK_URL is not set')
+    webhook_debug_url = getenv('WEBHOOK_DEBUG_URL')
+    if webhook_url is None and webhook_debug_url is None:
+        raise LambdaFunctionException(
+            'Neither WEBHOOK_URL nor WEBHOOK_DEBUG_URL is set'
+        )
     webhook_signature = getenv('WEBHOOK_SIGNATURE', 'hmac')
     if webhook_signature not in SIGNERS:
         raise LambdaFunctionException(
@@ -321,6 +369,13 @@ def send_webhook(envelope: dict[str, Any]) -> requests.Response:
     payload_bytes = json.dumps(envelope, ensure_ascii=False).encode('utf-8')
     headers = {'Content-Type': 'application/json'}
     headers.update(SIGNERS[webhook_signature](payload_bytes))
+
+    if webhook_debug_url is not None:
+        send_webhook_debug(webhook_debug_url, payload_bytes, headers)
+
+    if webhook_url is None:
+        return None
+
     response = requests.post(
         webhook_url, data=payload_bytes, headers=headers, timeout=10
     )
