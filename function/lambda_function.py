@@ -24,18 +24,32 @@ The webhook body is always an envelope of the form:
 "format" (WEBHOOK_FORMAT) selects which builder in DATA_BUILDERS produces
 "data", so the shape of "data" is fully determined by "format". Adding a
 new output format only requires adding a new builder function here.
+
+Two independent, optional attachment filters (both empty by default, so
+neither has any effect unless configured):
+
+- ATTACHMENT_REQUIRE_EXTENSIONS: if set, an email is only processed (and
+  sent to the webhook at all) when it has at least one attachment whose
+  extension matches. Applies regardless of WEBHOOK_FORMAT.
+- ATTACHMENT_ALLOW_EXTENSIONS: if set, only matching attachments are
+  included in the "postal" format's attachment list; non-matching ones
+  are dropped from the payload, but the email itself is still sent. Has
+  no effect on the "ses" format, which embeds the raw email as-is.
 """
 
 # modules used by this function
 import hashlib
 import hmac
 import json
+import mimetypes
 from base64 import b64encode
 from datetime import datetime
 from email import policy
 from email.parser import BytesParser
+from email.utils import formataddr, getaddresses
 from http import HTTPStatus
 from os import getenv
+from os.path import splitext
 from typing import Any
 
 import boto3
@@ -62,6 +76,43 @@ SPAM_STATUS_MAP = {
     'GRAY': 'Spam',
     'PROCESSING_FAILED': 'Spam',
 }
+
+
+# ----------------------------------------------------------------------
+# Attachment extension filtering (ATTACHMENT_REQUIRE_EXTENSIONS and
+# ATTACHMENT_ALLOW_EXTENSIONS) — see the module docstring above.
+# ----------------------------------------------------------------------
+
+
+def parse_extensions(value: str) -> set[str]:
+    """Parse a comma-separated extension list into a normalized set."""
+    return {
+        extension.strip().lstrip('.').lower()
+        for extension in value.split(',')
+        if extension.strip()
+    }
+
+
+def attachment_extension(filename: str | None, content_type: str) -> str:
+    """Return the lowercase extension (no dot) for an attachment."""
+    if filename:
+        extension = splitext(filename)[1]
+    else:
+        extension = mimetypes.guess_extension(content_type) or ''
+    return extension.lstrip('.').lower()
+
+
+def has_required_attachment(raw_email: bytes) -> bool:
+    """Check raw_email against ATTACHMENT_REQUIRE_EXTENSIONS, if set."""
+    required = parse_extensions(getenv('ATTACHMENT_REQUIRE_EXTENSIONS', ''))
+    if not required:
+        return True
+    message = BytesParser(policy=policy.default).parsebytes(raw_email)
+    return any(
+        attachment_extension(part.get_filename(), part.get_content_type())
+        in required
+        for part in message.iter_attachments()
+    )
 
 
 # ----------------------------------------------------------------------
@@ -118,15 +169,23 @@ def build_data_postal(
     text_part = message.get_body(preferencelist=('plain',))
     html_part = message.get_body(preferencelist=('html',))
 
+    allowed_extensions = parse_extensions(
+        getenv('ATTACHMENT_ALLOW_EXTENSIONS', '')
+    )
     attachments: list[dict[str, Any]] = []
     for part in message.iter_attachments():
+        filename = part.get_filename()
+        content_type = part.get_content_type()
+        extension = attachment_extension(filename, content_type)
+        if allowed_extensions and extension not in allowed_extensions:
+            continue
         content = part.get_content()
         if isinstance(content, str):
             content = content.encode('utf-8')
         attachments.append(
             {
-                'filename': part.get_filename(),
-                'content_type': part.get_content_type(),
+                'filename': filename,
+                'content_type': content_type,
                 'size': len(content),
                 'data': b64encode(content).decode('ascii'),
             }
@@ -139,10 +198,23 @@ def build_data_postal(
     received_at = datetime.fromisoformat(
         mail['timestamp'].replace('Z', '+00:00')
     )
+    # RFC 5322's "reply-to" is an address-list, same as "to"/"cc" — it can
+    # legitimately hold more than one address, so (unlike the other header
+    # fields above, kept as the single raw header string) this one is
+    # parsed into a list of individual addresses. getaddresses() also
+    # correctly splits on commas inside a quoted display name, which a
+    # naive split(',') — or Postal's own reference implementation, which
+    # only splits on repeated "Reply-To" header lines, not on individual
+    # addresses within one such line — would get wrong.
+    reply_to_addresses = getaddresses(message.get_all('reply-to', []))
 
     return {
         # SES's messageId is an opaque string, not the sequential integer ID
-        # Postal uses, so it's reused as-is for both "id" and "token"
+        # Postal uses (an auto-increment SQL column), so it's reused as-is
+        # for both "id" and "token" — a real, unfixable shape difference
+        # (string here vs int in Postal), but there's no numeric SES
+        # equivalent to use instead, and a generic string id is fine for
+        # any consumer that doesn't assume Postal's specific type.
         'id': mail['messageId'],
         'token': mail['messageId'],
         'rcpt_to': recipients[0],
@@ -150,6 +222,10 @@ def build_data_postal(
         'subject': message.get('subject'),
         'message_id': message.get('message-id'),
         'timestamp': received_at.timestamp(),
+        # Postal's own "size" is a plain SQL varchar column returned as-is
+        # (no numeric cast on their end), so it's actually a string there,
+        # not an int — this int is the more correct shape and is kept as
+        # such on purpose.
         'size': len(raw_email),
         'spam_status': spam_status,
         'bounce': False,
@@ -161,7 +237,11 @@ def build_data_postal(
         'date': message.get('date'),
         'in_reply_to': message.get('in-reply-to'),
         'references': message.get('references'),
-        'reply_to': message.get('reply-to'),
+        'reply_to': (
+            [formataddr(pair) for pair in reply_to_addresses]
+            if reply_to_addresses
+            else None
+        ),
         'plain_body': (
             text_part.get_content() if text_part is not None else None
         ),
@@ -267,6 +347,10 @@ def process_ses_record(record: dict[str, Any]) -> None:
     mail = record['ses']['mail']
     receipt = record['ses']['receipt']
     raw_email = get_raw_email(mail['messageId'])
+    # ATTACHMENT_REQUIRE_EXTENSIONS gate: discard the email entirely if it
+    # has no attachment matching one of the required extensions.
+    if not has_required_attachment(raw_email):
+        return
     envelope = build_envelope(mail, receipt, raw_email)
     send_webhook(envelope)
 

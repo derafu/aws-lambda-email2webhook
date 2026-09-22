@@ -10,8 +10,8 @@ on:
       - main
 
 jobs:
-  lint:
-    name: Lint & type check
+  tests:
+    name: Lint, type check & tests
     timeout-minutes: 10
     runs-on: ubuntu-latest
     strategy:
@@ -45,3 +45,6 @@ jobs:
 
       - name: Run mypy
         run: mypy
+
+      - name: Run pytest
+        run: pytest -v

@@ -2,7 +2,7 @@ PYTHON := python3.14
 VENV := .venv
 VENV_READY := $(VENV)/.installed
 
-.PHONY: all dev lint format format-check typecheck check clean
+.PHONY: all dev lint format format-check typecheck test check clean
 
 $(VENV_READY): pyproject.toml
 	$(PYTHON) -m venv $(VENV)
@@ -24,7 +24,10 @@ format-check: $(VENV_READY)
 typecheck: $(VENV_READY)
 	$(VENV)/bin/mypy
 
-check: lint format-check typecheck
+test: $(VENV_READY)
+	$(VENV)/bin/pytest -v
+
+check: lint format-check typecheck test
 
 all: clean
 	$(PYTHON) -m pip install --target function/ $$($(PYTHON) -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))")

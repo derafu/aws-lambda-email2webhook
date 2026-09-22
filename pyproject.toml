@@ -21,7 +21,16 @@ dev = [
   # installed only for local development/type-checking; the Lambda runtime
   # already provides it, so it must never end up in the deployment zip.
   "boto3",
+  "pytest",
+  "pytest-cov",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# lambda_function.py is a flat script, not an installable package, so its
+# directory is added to sys.path instead of installing anything editable.
+pythonpath = ["function"]
+addopts = "-ra"
 
 [tool.mypy]
 python_version = "3.14"
@@ -89,6 +98,9 @@ max-complexity = 25
 max-args = 10
 max-branches = 25
 max-statements = 60
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "PLR2004"]
 
 [tool.ruff.format]
 quote-style = "single"
