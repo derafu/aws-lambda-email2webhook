@@ -1,0 +1,94 @@
+[project]
+name = "aws-lambda-email2webhook"
+version = "0.1.0"
+description = "Lambda that forwards an email received by an SES receipt rule as a signed webhook."
+readme = "README.rst"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Esteban De La Fuente Rubio / Derafu" },
+]
+requires-python = ">=3.14"
+dependencies = [
+  "requests",
+]
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+  "mypy",
+  "types-requests",
+  "boto3-stubs[s3]",
+  # installed only for local development/type-checking; the Lambda runtime
+  # already provides it, so it must never end up in the deployment zip.
+  "boto3",
+]
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["function"]
+
+[tool.ruff]
+include = ["**/*.py"]
+
+exclude = [
+  ".git",
+  "__pycache__",
+  ".venv",
+  "venv",
+]
+
+line-length = 79
+target-version = "py314"
+respect-gitignore = true
+fix = true
+
+[tool.ruff.lint]
+
+select = [
+  "D",
+  "F",
+  "E",
+  "W",
+  "I",
+  "UP",
+  "N",
+  "B",
+  "A",
+  "C90",
+  "ARG",
+  "DTZ",
+  "TRY",
+  "SLF",
+  "ERA",
+  "PL",
+  "RUF",
+]
+
+ignore = [
+  "D102",
+  "D203",
+  "D212",
+  "D401",
+  "TRY400",
+  "N818",
+  "UP031",
+  "TRY003",
+  "ARG001",
+  "Q001",
+  "ERA001",
+  "PLC0415",
+  "N802",
+  "N806",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.pylint]
+max-args = 10
+max-branches = 25
+max-statements = 60
+
+[tool.ruff.format]
+quote-style = "single"
